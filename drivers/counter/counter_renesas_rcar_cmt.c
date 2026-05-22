@@ -57,6 +57,7 @@ struct rcar_cmt_config {
 	struct counter_config_info counter_info;
 	uint32_t clk_en_base;
 	uint32_t cnt_base;
+	uint32_t clk_division;
 	void (*cfg_func)(void);
 };
 
@@ -359,11 +360,31 @@ static void rcar_cmt_irq_handler(const struct rcar_cmt_irq_param *param)
 	}
 }
 
+/* Helper function to map the division ratio to CMCSR.CKS bit */
+static int32_t division_to_cksbit(uint32_t division_ratio) {
+	/* Find the CKS bit value from division ratio */
+	const uint32_t division_map[][2] = {
+		{8, 0x0u}, {32, 0x1u}, {128, 0x2u}
+	};
+	for (int i = 0; i < (sizeof(division_map) / sizeof(division_map[0])); i++) {
+		if (division_ratio == division_map[i][0]) {
+			return division_map[i][1];
+		}
+	}
+
+	return -ENOTSUP;
+}
+
 static int rcar_cmt_init(const struct device *dev)
 {
 	const struct rcar_cmt_config *config = (const struct rcar_cmt_config *)dev->config;
 	uint32_t clken = config->clk_en_base;
 	uint32_t cnt_base = config->cnt_base;
+
+	int32_t cks_bit = division_to_cksbit(config->clk_division);
+	if (cks_bit < 0) {
+		return -ENOTSUP;
+	}
 
 	/* Configure clock and interrupts */
 	config->cfg_func();
@@ -388,7 +409,7 @@ static int rcar_cmt_init(const struct device *dev)
 		/* Run the counter in debug mode */
 		value |= BIT_DBGIVD;
 		/* Clock division: CPEX/8 */
-		value &= ~BIT_CKS_MASK;
+		value |= FIELD_PREP(BIT_CKS_MASK, (uint32_t)cks_bit);
 		sys_write32(value, cmcsr);
 
 		/* Clear CMCSRH register for 32-bit counter, CPEX/8 clock division setting */
@@ -413,73 +434,75 @@ static DEVICE_API(counter, rcar_cmt_driver_api) = {
 	.set_guard_period = rcar_cmt_set_guard_period,
 };
 
-#define RCAR_CMT_INIT(n)                                                                        \
-	const struct rcar_cmt_irq_param irq_param_##n[] = {                                     \
-		{ .dev = DEVICE_DT_INST_GET(n), .channel = 0, },                                \
-		{ .dev = DEVICE_DT_INST_GET(n), .channel = 1, },                                \
-		{ .dev = DEVICE_DT_INST_GET(n), .channel = 2, },                                \
-		{ .dev = DEVICE_DT_INST_GET(n), .channel = 3, },                                \
-	};                                                                                      \
-	static void rcar_cmt_irq_init_##n(void)                                                 \
-	{                                                                                       \
-		IRQ_CONNECT(DT_INST_IRQ_BY_IDX(n, 0, irq),                                      \
-			    IRQ_DEFAULT_PRIORITY,                                               \
-			    rcar_cmt_irq_handler,                                               \
-			    &irq_param_##n[0],                                                  \
-			    DT_INST_IRQ_BY_IDX(n, 0, flags)                                     \
-		);                                                                              \
-		irq_enable(DT_INST_IRQN_BY_IDX(n, 0));                                          \
-		IRQ_CONNECT(DT_INST_IRQ_BY_IDX(n, 1, irq),                                      \
-			    IRQ_DEFAULT_PRIORITY,                                               \
-			    rcar_cmt_irq_handler,                                               \
-			    &irq_param_##n[1],                                                  \
-			    DT_INST_IRQ_BY_IDX(n, 1, flags)                                     \
-		);                                                                              \
-		irq_enable(DT_INST_IRQN_BY_IDX(n, 1));                                          \
-		IRQ_CONNECT(DT_INST_IRQ_BY_IDX(n, 2, irq),                                      \
-			    IRQ_DEFAULT_PRIORITY,                                               \
-			    rcar_cmt_irq_handler,                                               \
-			    &irq_param_##n[2],                                                  \
-			    DT_INST_IRQ_BY_IDX(n, 2, flags)                                     \
-		);                                                                              \
-		irq_enable(DT_INST_IRQN_BY_IDX(n, 2));                                          \
-		IRQ_CONNECT(DT_INST_IRQ_BY_IDX(n, 3, irq),                                      \
-			    IRQ_DEFAULT_PRIORITY,                                               \
-			    rcar_cmt_irq_handler,                                               \
-			    &irq_param_##n[3],                                                  \
-			    DT_INST_IRQ_BY_IDX(n, 3, flags)                                     \
-		);                                                                              \
-		irq_enable(DT_INST_IRQN_BY_IDX(n, 3));                                          \
-	}                                                                                       \
-	static void rcar_cmt_config_##n(void)                                                   \
-	{                                                                                       \
-		const struct device *clk;                                                       \
-		struct rcar_cpg_clk mod_clk = {                                                 \
-			.module = DT_INST_CLOCKS_CELL(n, module),                               \
-			.domain = DT_INST_CLOCKS_CELL(n, domain),                               \
-		};                                                                              \
-		clk = DEVICE_DT_GET(DT_INST_CLOCKS_CTLR(n));                                    \
-		clock_control_on(clk, (clock_control_subsys_t)&mod_clk);                        \
-		rcar_cmt_irq_init_##n();                                                        \
-	}                                                                                       \
-	static struct rcar_cmt_config config_##n = {                                            \
-		.counter_info = { .max_top_value = (uint32_t)UINT32_MAX,                        \
-				  .freq = DT_INST_PROP(n, clock_frequency),                     \
-				  .flags = COUNTER_CONFIG_INFO_COUNT_UP,                        \
-				  .channels =  DT_INST_NUM_IRQS(n)                              \
-		},                                                                              \
-		.clk_en_base = DT_INST_REG_ADDR_BY_IDX(n, 1),                                   \
-		.cnt_base = DT_INST_REG_ADDR_BY_IDX(n, 0),                                      \
-		.cfg_func = rcar_cmt_config_##n                                                 \
-	};                                                                                      \
-	static struct rcar_cmt_data cmt_data_##n;                                               \
-	DEVICE_DT_INST_DEFINE(n,                                                                \
-		rcar_cmt_init,                                                                  \
-		NULL,                                                                           \
-		&cmt_data_##n,                                                                  \
-		&config_##n,                                                                    \
-		POST_KERNEL,                                                                    \
-		CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                                            \
+#define RCAR_CMT_INIT(n)                                                                           \
+	const struct rcar_cmt_irq_param irq_param_##n[] = {                                        \
+		{ .dev = DEVICE_DT_INST_GET(n), .channel = 0, },                                   \
+		{ .dev = DEVICE_DT_INST_GET(n), .channel = 1, },                                   \
+		{ .dev = DEVICE_DT_INST_GET(n), .channel = 2, },                                   \
+		{ .dev = DEVICE_DT_INST_GET(n), .channel = 3, },                                   \
+	};                                                                                         \
+	static void rcar_cmt_irq_init_##n(void)                                                    \
+	{                                                                                          \
+		IRQ_CONNECT(DT_INST_IRQ_BY_IDX(n, 0, irq),                                         \
+			    IRQ_DEFAULT_PRIORITY,                                                  \
+			    rcar_cmt_irq_handler,                                                  \
+			    &irq_param_##n[0],                                                     \
+			    DT_INST_IRQ_BY_IDX(n, 0, flags)                                        \
+		);                                                                                 \
+		irq_enable(DT_INST_IRQN_BY_IDX(n, 0));                                             \
+		IRQ_CONNECT(DT_INST_IRQ_BY_IDX(n, 1, irq),                                         \
+			    IRQ_DEFAULT_PRIORITY,                                                  \
+			    rcar_cmt_irq_handler,                                                  \
+			    &irq_param_##n[1],                                                     \
+			    DT_INST_IRQ_BY_IDX(n, 1, flags)                                        \
+		);                                                                                 \
+		irq_enable(DT_INST_IRQN_BY_IDX(n, 1));                                             \
+		IRQ_CONNECT(DT_INST_IRQ_BY_IDX(n, 2, irq),                                         \
+			    IRQ_DEFAULT_PRIORITY,                                                  \
+			    rcar_cmt_irq_handler,                                                  \
+			    &irq_param_##n[2],                                                     \
+			    DT_INST_IRQ_BY_IDX(n, 2, flags)                                        \
+		);                                                                                 \
+		irq_enable(DT_INST_IRQN_BY_IDX(n, 2));                                             \
+		IRQ_CONNECT(DT_INST_IRQ_BY_IDX(n, 3, irq),                                         \
+			    IRQ_DEFAULT_PRIORITY,                                                  \
+			    rcar_cmt_irq_handler,                                                  \
+			    &irq_param_##n[3],                                                     \
+			    DT_INST_IRQ_BY_IDX(n, 3, flags)                                        \
+		);                                                                                 \
+		irq_enable(DT_INST_IRQN_BY_IDX(n, 3));                                             \
+	}                                                                                          \
+	static void rcar_cmt_config_##n(void)                                                      \
+	{                                                                                          \
+		const struct device *clk;                                                          \
+		struct rcar_cpg_clk mod_clk = {                                                    \
+			.module = DT_INST_CLOCKS_CELL(n, module),                                  \
+			.domain = DT_INST_CLOCKS_CELL(n, domain),                                  \
+		};                                                                                 \
+		clk = DEVICE_DT_GET(DT_INST_CLOCKS_CTLR(n));                                       \
+		clock_control_on(clk, (clock_control_subsys_t)&mod_clk);                           \
+		rcar_cmt_irq_init_##n();                                                           \
+	}                                                                                          \
+	static struct rcar_cmt_config config_##n = {                                               \
+		.counter_info = { .max_top_value = (uint32_t)UINT32_MAX,                           \
+				  .freq = DT_PROP(DT_NODELABEL(clock_cpex), clock_frequency) /     \
+				          DT_INST_PROP(n, clock_div),                              \
+				  .flags = COUNTER_CONFIG_INFO_COUNT_UP,                           \
+				  .channels =  DT_INST_NUM_IRQS(n)                                 \
+		},                                                                                 \
+		.clk_en_base = DT_INST_REG_ADDR_BY_IDX(n, 1),                                      \
+		.cnt_base = DT_INST_REG_ADDR_BY_IDX(n, 0),                                         \
+		.clk_division = DT_INST_PROP(n, clock_div),                                        \
+		.cfg_func = rcar_cmt_config_##n                                                    \
+	};                                                                                         \
+	static struct rcar_cmt_data cmt_data_##n;                                                  \
+	DEVICE_DT_INST_DEFINE(n,                                                                   \
+		rcar_cmt_init,                                                                     \
+		NULL,                                                                              \
+		&cmt_data_##n,                                                                     \
+		&config_##n,                                                                       \
+		POST_KERNEL,                                                                       \
+		CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                                               \
 		&rcar_cmt_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(RCAR_CMT_INIT)

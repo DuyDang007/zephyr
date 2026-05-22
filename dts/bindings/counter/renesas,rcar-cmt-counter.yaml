@@ -8,13 +8,17 @@ properties:
   reg:
     required: true
 
-  clock-frequency:
-    type: int
-    required: true
-    description: Clock frequency information for Timer operation
-
   clocks:
     required: true
 
   interrupts:
     required: true
+
+  clock-div:
+    type: int
+    default: 8
+    description: Clock division ratio
+    enum:
+      - 8
+      - 32
+      - 128
